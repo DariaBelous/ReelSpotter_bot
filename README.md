@@ -11,12 +11,17 @@ Telegram bot that identifies real-world locations from reel/tiktok screenshots u
 
 ## Project Structure
 
-backend/
-
-└── main.py
-bot/
-
-└── bot.py
+```
+reelspotter-bot/
+├── backend/
+│   └── main.py          # FastAPI: /analyze, /history, /refine, /celebrate
+├── bot/
+│   └── bot.py           # Telegram bot (aiogram 3)
+├── .env                 # API keys (not in repo)
+├── .gitignore
+├── requirements.txt
+└── README.md
+```
 
 ## Installation
 pip install -r requirements.txt
