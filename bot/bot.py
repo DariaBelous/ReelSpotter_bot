@@ -52,35 +52,6 @@ async def handle_photo(message: Message):
     await message.answer(f"📍 {location}")
     await message.answer("Угадал? Если нет — напиши /hint или пришли ещё фото 🗺")
 
-@dp.message(F.text & F.text.lower.in_({"другой ракурс", "новое место"}))
-async def handle_angle_choice(message: Message):
-    ctx = user_context.get(message.from_user.id, {})
-    pending = ctx.get("pending_photo")
-    if not pending:
-        await message.answer("Отправь фото!")
-        return
-    image_bytes = bytes.fromhex(pending)
-    if "новое место" in message.text.lower():
-        user_context[message.from_user.id] = {}
-        await message.answer("Окей, начинаем заново! Анализирую... 🪷")
-    else:
-        photos = ctx.get("photos", [])
-        photos.append(pending)
-        user_context[message.from_user.id] = {**ctx, "photos": photos}
-        await message.answer("Понял, смотрю с другого ракурса... 🦭")
-    async with aiohttp.ClientSession() as session:
-        data = aiohttp.FormData()
-        data.add_field("file", image_bytes, filename="photo.jpg", content_type="image/jpeg")
-        previous = ctx.get("last_result", "") if "другой ракурс" in message.text.lower() else ""
-        params = {"user_id": str(message.from_user.id)}
-        if previous:
-            params["previous_guess"] = previous
-        async with session.post(f"{BACKEND_URL}/analyze", params=params, data=data) as resp:
-            result = await resp.json()
-    location = result.get("location", "Не удалось определить место")
-    user_context[message.from_user.id] = {"last_result": location, "photos": ctx.get("photos", [])}
-    await message.answer(f"📍 {location}")
-    await message.answer("Угадал теперь? 🫵🏻")
 
 @dp.message(Command("hint"))
 async def handle_hint(message: Message):
