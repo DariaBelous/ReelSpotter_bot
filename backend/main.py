@@ -5,8 +5,8 @@ import os
 import base64
 import httpx
 from dotenv import load_dotenv
-
 from pathlib import Path
+
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
@@ -36,36 +36,47 @@ def init_db():
 
 init_db()
 
-@app.post("/analyze")
-async def analyze(user_id: str, file: UploadFile = File(...)):
-    image_bytes = await file.read()
-    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
-    async with httpx.AsyncClient(timeout=30) as client:
+async def call_openrouter(messages, timeout=30):
+    async with httpx.AsyncClient(timeout=timeout) as client:
         response = await client.post(
             "https://openrouter.ai/api/v1/chat/completions",
             headers={
                 "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                 "Content-Type": "application/json"
             },
-            json={
-                "model": "openrouter/auto",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": [
-                            {"type": "text", "text": "Look at this screenshot. Try to identify the real-world location shown. Always respond in Russian. Start with 'Возможно, это' или 'Это может быть'. Give 2-3 possible locations if unsure. Return the place name and city/country. If you cannot determine the location at all, say so honestly in Russian."},
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
-                        ]
-                    }
-                ]
-            }
+            json={"model": "openrouter/auto", "messages": messages}
         )
     resp_json = response.json()
-    print("OpenRouter response:", resp_json)
     if "choices" not in resp_json:
-        result = str(resp_json.get("error", "Не удалось определить место"))
+        return None, resp_json.get("error", "Ошибка")
+    return resp_json["choices"][0]["message"]["content"], None
+
+@app.post("/analyze")
+async def analyze(
+    user_id: str,
+    previous_guess: str | None = None,
+    file: UploadFile = File(...)
+):
+    image_bytes = await file.read()
+    image_base64 = base64.b64encode(image_bytes).decode("utf-8")
+
+    if previous_guess:
+        prompt = f"Ранее я предположил: {previous_guess}. Теперь смотрю на другой ракурс того же места. Уточни или подтверди местоположение. Отвечай на русском, начни с 'Возможно, это' или 'Это может быть'. Не ставь точку в конце последнего предложения."
     else:
-        result = resp_json["choices"][0]["message"]["content"]
+        prompt = "Посмотри на это фото. Попробуй определить реальное место. Отвечай на русском. Начни с 'Возможно, это' или 'Это может быть'. Назови место, город, страну. Если не уверен — предложи 2-3 варианта. Если совсем не можешь определить — скажи честно. Не ставь точку в конце последнего предложения. Выделяй названия мест жирным через **название**."
+
+    messages = [{
+        "role": "user",
+        "content": [
+            {"type": "text", "text": prompt},
+            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_base64}"}}
+        ]
+    }]
+
+    result, error = await call_openrouter(messages)
+    if error:
+        result = "Не удалось определить место"
+
     conn = sqlite3.connect("history.db")
     cursor = conn.cursor()
     cursor.execute("INSERT INTO requests (user_id, result) VALUES (?, ?)", (user_id, result))
@@ -75,96 +86,112 @@ async def analyze(user_id: str, file: UploadFile = File(...)):
 
 @app.post("/refine")
 async def refine(data: dict):
-    user_id = data.get("user_id")
-    hint = data.get("hint")
-    previous = data.get("previous")
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "openrouter/auto",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"""Пользователь прислал фото места. Мой предыдущий ответ был: "{previous}". 
+    hint = data.get("hint", "")
+    previous = data.get("previous", "")
+
+    messages = [{
+        "role": "user",
+        "content": f"""Я анализирую фото места. Мой предыдущий ответ: "{previous}".
 Пользователь написал: "{hint}".
 
-Если пользователь называет конкретное место (улицу, район, достопримечательность) — просто подтверди это место, скажи что-то интересное о нём в 1-2 предложениях. Не пиши "с учётом подсказки" — просто отвечай как будто ты это знал.
+Важно: если пользователь называет место которого не существует или написал с ошибкой — мягко скажи что не можешь найти такое место и попроси уточнить. Не придумывай несуществующие места.
 
-Если пользователь даёт неполную подсказку (страна, город) — уточни конкретнее.
+Если место реальное и конкретное — подтверди его и расскажи 1-2 интересных факта. Не используй фразу "с учётом подсказки". Пиши как будто ты это и так знал.
 
-Отвечай на русском, коротко."""
-                    }
-                ]
-            }
-        )
-    resp_json = response.json()
-    result = resp_json["choices"][0]["message"]["content"] if "choices" in resp_json else "Не удалось уточнить"
-    return {"location": result}
+Если подсказка неполная (только страна или город) — уточни конкретнее, задай один вопрос.
+
+Выделяй названия мест жирным через **название**.
+Не ставь точку в конце последнего предложения.
+Отвечай на русском, коротко и живо."""
+    }]
+
+    result, error = await call_openrouter(messages)
+    if error:
+        result = "Не удалось уточнить"
+    return {"location": result, "text": result}
 
 @app.post("/celebrate")
 async def celebrate(data: dict):
     place = data.get("place", "это место")
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {OPENROUTER_API_KEY}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "openrouter/auto",
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": f"Ты крутой бот который определяет места по фото. Пользователь подтвердил что ты угадал: {place}. Напиши короткую радостную реакцию на русском — максимум 2 предложения, без мата, без пафоса, можно использовать только эти эмодзи если хочешь: 🫰🏻 🪩 🍋‍🟩 🪼 🎐 🍜 🧚🏻 💅🏻 — максимум одно. В конце коротко спроси нужна ли ещё помощь."
-                    }
-                ]
-            }
-        )
-    resp_json = response.json()
-    result = resp_json["choices"][0]["message"]["content"] if "choices" in resp_json else "Ура! Я угадал! 🎉 Нужна ещё помощь?"
+
+    messages = [{
+        "role": "user",
+        "content": f"""Ты бот который определяет места по фото. Пользователь подтвердил место: {place}.
+Напиши короткую живую реакцию на русском — 1-2 предложения. 
+Стиль: спокойный, немного атмосферный, как будто тебе самому интересно это место.
+Без кринжа, без пафоса, без мата, без восклицаний типа "юху", "вау", "отлично!".
+Используй максимум одно эмодзи из этого списка: 🎐 🫰🏻 🍜 🪼 🍵 🍋 🧸 🥡 🪷
+Не ставь точку в конце последнего предложения
+Не спрашивай нужна ли помощь — это сделает бот отдельно."""
+    }]
+
+    result, error = await call_openrouter(messages)
+    if error:
+        result = "Нашли 🎐"
     return {"text": result}
+
+@app.post("/intent")
+async def detect_intent(data: dict):
+    text = data.get("text", "")
+
+    messages = [{
+        "role": "user",
+        "content": f"""Пользователь написал: "{text}"
+
+Определи намерение. Ответь ТОЛЬКО одним словом из списка:
+- POSITIVE — угадал, верно, да это оно, точно, правильно, да, ага, хочу, давай, супер, именно
+- NEGATIVE — нет, не то, ошибся, не угадал, неверно, не хочу, хватит, пока, всё
+- NEW_PLACE — новое место, другое место, начнём заново, другое фото
+- SAME_ANGLE — другой ракурс, то же место, ещё фото отсюда, с другой стороны, то же самое, та же локация
+- PHOTO_OFFER — могу прислать фото, пришлю скрин, есть ещё фотка, хочешь фото
+- HINT — называет конкретное место, город, страну, достопримечательность, район
+- OTHER — вопрос, непонятная фраза, всё остальное
+
+Отвечай ТОЛЬКО одним словом."""
+    }]
+
+    result, error = await call_openrouter(messages)
+    if error:
+        return {"intent": "OTHER"}
+
+    intent = result.strip().upper().split()[0] if result else "OTHER"
+    valid = {"POSITIVE", "NEGATIVE", "NEW_PLACE", "SAME_ANGLE", "PHOTO_OFFER", "HINT", "OTHER"}
+    if intent not in valid:
+        intent = "OTHER"
+    return {"intent": intent}
 
 @app.get("/history")
 def get_history(user_id: str):
     conn = sqlite3.connect("history.db")
     cursor = conn.cursor()
-    cursor.execute("SELECT result, created_at FROM requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 10", (user_id,))
+    cursor.execute(
+        "SELECT result, created_at FROM requests WHERE user_id = ? ORDER BY created_at DESC LIMIT 10",
+        (user_id,)
+    )
     rows = cursor.fetchall()
     conn.close()
     return {"history": [{"result": r[0], "created_at": r[1]} for r in rows]}
 
-@app.post("/intent")
-async def detect_intent(data: dict):
-    text = data.get("text")
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://openrouter.ai/api/v1/chat/completions",
-            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
-            json={
-                "model": "openrouter/auto",
-                "messages": [{
-                    "role": "user",
-                    "content": f"""Пользователь написал: "{text}"
-Определи намерение. Ответь ТОЛЬКО одним словом из списка:
-- POSITIVE (угадал, верно, да это оно, точно)
-- NEGATIVE (нет, не то, ошибся, не угадал)
-- NEW_PLACE (новое место, другое место, начнём заново)
-- SAME_ANGLE (другой ракурс, ещё фото того же места, с другой стороны)
-- PHOTO_OFFER (могу прислать фото, пришлю скрин, есть ещё фотка)
-- HINT (подсказка, это в москве, это россия, это около арбата)
-- OTHER"""
-                }]
-            }
-        )
-    resp_json = response.json()
-    intent = resp_json["choices"][0]["message"]["content"].strip().upper()
-    valid = {"POSITIVE", "NEGATIVE", "NEW_PLACE", "SAME_ANGLE", "PHOTO_OFFER", "HINT", "OTHER"}
-    if intent not in valid:
-        intent = "OTHER"
-    return {"intent": intent}
+@app.post("/chat")
+async def chat(data: dict):
+    text = data.get("text", "")
+    context = data.get("context", "")
+
+    ctx_part = f"Контекст: мы сейчас ищем место '{context}'." if context else ""
+
+    messages = [{
+        "role": "user",
+        "content": f"""Ты бот ReelSpotter — помогаешь определять места по фото из рилсов и тиктоков.
+{ctx_part}
+Пользователь написал: "{text}"
+
+Ответь коротко и по-человечески на русском. Стиль спокойный, живой, без кринжа.
+Если пользователь шутит или спрашивает что-то не по теме — можешь мягко поддержать но верни разговор к делу.
+Используй максимум одно эмодзи из списка: 🎐 🫰🏻 🍜 🪼 🍵 🍋 🧸 🥡 🪷
+Не ставь точку в конце."""
+    }]
+
+    result, error = await call_openrouter(messages)
+    if error:
+        result = "Пришли скриншот 🪩 или напиши /hint"
+    return {"text": result}
