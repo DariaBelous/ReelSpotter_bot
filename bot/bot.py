@@ -105,31 +105,28 @@ async def handle_history(message: Message):
 @dp.message(F.text)
 async def handle_text(message: Message):
     ctx = user_context.get(message.from_user.id, {})
-    text_lower = message.text.lower()
-    positive_words = ["угадал", "да", "верно", "точно", "правильно", "yes", "yep", "так и есть"]
-    negative_words = ["не угадал", "нет", "неверно", "не то", "ошибся", "промахнулся", "такого нет"]
-    is_positive = any(word in text_lower for word in positive_words)
-    is_negative = any(word in text_lower for word in negative_words)
-    if ctx.get("waiting_hint"):
-        hint = message.text
-        photo_offer_words = ["фото", "photo", "пришлю", "прислать", "скрин", "картинку"]
-        if any(w in hint.lower() for w in photo_offer_words):
-            await message.answer("Да, пришли фото! 🍋")
-            user_context[message.from_user.id] = {**ctx, "waiting_hint": False}
-            return
-        last = ctx.get("last_result", "")
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{BACKEND_URL}/intent",
+            json={"text": message.text}
+        ) as resp:
+            intent_result = await resp.json()
+    
+    intent = intent_result.get("intent", "OTHER")
+    
+    if intent == "PHOTO_OFFER":
+        await message.answer("Да, пришли! 🍋")
+    
+    elif intent == "SAME_ANGLE" and ctx.get("last_result"):
+        await message.answer("Окей, жду фото с другого ракурса 🦭")
+        user_context[message.from_user.id] = {**ctx, "expecting_angle": True}
+    
+    elif intent == "NEW_PLACE":
         user_context[message.from_user.id] = {}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{BACKEND_URL}/refine",
-                json={"user_id": str(message.from_user.id), "hint": hint, "previous": last}
-            ) as resp:
-                result = await resp.json()
-        location = result.get("location", "Не удалось уточнить")
-        user_context[message.from_user.id] = {"last_result": location}
-        await message.answer(f"📍 С учётом подсказки: {location}")
-        await message.answer("Угадал? Если нет — снова /hint или пришли фото 🗺")
-    elif is_positive and ctx.get("last_result"):
+        await message.answer("Окей, начинаем заново! Пришли новое фото 🪷")
+    
+    elif intent == "POSITIVE" and ctx.get("last_result"):
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 f"{BACKEND_URL}/celebrate",
@@ -137,16 +134,27 @@ async def handle_text(message: Message):
             ) as resp:
                 result = await resp.json()
         celebration = result.get("text", "Ура 🫰🏻")
-        user_context[message.from_user.id] = {"last_result": ctx.get("last_result"), "celebrated": True}
+        user_context[message.from_user.id] = {**ctx, "celebrated": True}
         await message.answer(celebration)
-    elif is_negative and ctx.get("last_result"):
-        await message.answer("Ой, промахнулся 🪼 Напиши /hint — расскажи где это было, попробую уточнить!")
-        user_context[message.from_user.id] = {"last_result": ctx.get("last_result"), "waiting_hint": True}
-    elif ctx.get("celebrated") and any(w in text_lower for w in ["хотя", "погоди", "стоп", "подожди", "не то"]):
-        await message.answer("Ой, подожди! Напиши /hint и уточни 🧭")
-        user_context[message.from_user.id] = {"last_result": ctx.get("last_result"), "waiting_hint": True}
-    elif any(w in text_lower for w in ["фото", "photo", "пришлю", "прислать", "скрин"]):
-        await message.answer("Да, пришли! 🧸")
+    
+    elif intent == "NEGATIVE" and ctx.get("last_result"):
+        await message.answer("Ой, промахнулся 🪼 Напиши /hint или пришли ещё фото!")
+        user_context[message.from_user.id] = {**ctx, "waiting_hint": True}
+    
+    elif intent == "HINT" or ctx.get("waiting_hint"):
+        last = ctx.get("last_result", "")
+        user_context[message.from_user.id] = {**ctx, "waiting_hint": False}
+        async with aiohttp.ClientSession() as session:
+            async with session.post(
+                f"{BACKEND_URL}/refine",
+                json={"user_id": str(message.from_user.id), "hint": message.text, "previous": last}
+            ) as resp:
+                result = await resp.json()
+        location = result.get("location", "Не удалось уточнить")
+        user_context[message.from_user.id] = {"last_result": location}
+        await message.answer(f"📍 С учётом подсказки: {location}")
+        await message.answer("Угадал? Если нет — снова /hint или пришли фото 🎐")
+    
     else:
         await message.answer("Отправь мне скриншот 🪩 или используй /hint чтобы уточнить место.")
 
@@ -155,3 +163,8 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
+
+@dp.message(Command("reset"))
+async def handle_reset(message: Message):
+    user_context[message.from_user.id] = {}
+    await message.answer("Всё сброшено, начинаем заново! Пришли фото 🪷")

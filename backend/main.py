@@ -131,3 +131,33 @@ def get_history(user_id: str):
     rows = cursor.fetchall()
     conn.close()
     return {"history": [{"result": r[0], "created_at": r[1]} for r in rows]}
+
+@app.post("/intent")
+async def detect_intent(data: dict):
+    text = data.get("text")
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            "https://openrouter.ai/api/v1/chat/completions",
+            headers={"Authorization": f"Bearer {OPENROUTER_API_KEY}", "Content-Type": "application/json"},
+            json={
+                "model": "openrouter/auto",
+                "messages": [{
+                    "role": "user",
+                    "content": f"""Пользователь написал: "{text}"
+Определи намерение. Ответь ТОЛЬКО одним словом из списка:
+- POSITIVE (угадал, верно, да это оно, точно)
+- NEGATIVE (нет, не то, ошибся, не угадал)
+- NEW_PLACE (новое место, другое место, начнём заново)
+- SAME_ANGLE (другой ракурс, ещё фото того же места, с другой стороны)
+- PHOTO_OFFER (могу прислать фото, пришлю скрин, есть ещё фотка)
+- HINT (подсказка, это в москве, это россия, это около арбата)
+- OTHER"""
+                }]
+            }
+        )
+    resp_json = response.json()
+    intent = resp_json["choices"][0]["message"]["content"].strip().upper()
+    valid = {"POSITIVE", "NEGATIVE", "NEW_PLACE", "SAME_ANGLE", "PHOTO_OFFER", "HINT", "OTHER"}
+    if intent not in valid:
+        intent = "OTHER"
+    return {"intent": intent}
