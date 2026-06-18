@@ -24,23 +24,32 @@ reelspotter-bot/
 ```
 
 ## Installation
+```
 pip install -r requirements.txt
+```
 
 ## Run the Project
 
 ### 1. Add your keys to .env file
+```
 TELEGRAM_TOKEN=your_token
 
 OPENROUTER_API_KEY=your_key
+```
+
 ### 2. Run FastAPI backend
+```
 cd backend
 
 uvicorn main:app --reload
+```
 
 ### 3. Run Telegram bot
+```
 cd bot
 
 python bot.py
+```
 
 ## Tech Stack
 
